@@ -123,3 +123,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ---
 
 *Building the future of professional verification, one skill at a time.*
+![image](https://github.com/user-attachments/assets/0906e08d-766f-43d0-8952-1476ca9d23ca)
