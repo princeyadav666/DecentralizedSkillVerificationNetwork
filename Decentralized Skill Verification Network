@@ -1,0 +1,224 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/Counters.sol";
+
+contract Project is ERC721, Ownable {
+    using Counters for Counters.Counter;
+    Counters.Counter private _tokenIds;
+
+    // Struct to represent a skill verification NFT
+    struct SkillNFT {
+        string skillName;
+        string description;
+        address issuer;
+        uint256 timestamp;
+        bool isActive;
+        uint256 challengeStake;
+        bool underChallenge;
+        address challenger;
+        uint256 challengeDeadline;
+    }
+
+    // Struct to represent a challenge
+    struct Challenge {
+        uint256 tokenId;
+        address challenger;
+        string reason;
+        uint256 stake;
+        uint256 votesFor;
+        uint256 votesAgainst;
+        uint256 deadline;
+        bool resolved;
+        mapping(address => bool) hasVoted;
+    }
+
+    // Mappings
+    mapping(uint256 => SkillNFT) public skillNFTs;
+    mapping(uint256 => Challenge) public challenges;
+    mapping(address => bool) public authorizedIssuers;
+    
+    // Constants
+    uint256 public constant CHALLENGE_PERIOD = 7 days;
+    uint256 public constant MIN_CHALLENGE_STAKE = 0.1 ether;
+    uint256 public constant JURY_REWARD_POOL = 0.05 ether;
+
+    // Events
+    event SkillVerified(uint256 indexed tokenId, address indexed holder, string skillName, address indexed issuer);
+    event SkillChallenged(uint256 indexed tokenId, address indexed challenger, uint256 stake);
+    event ChallengeResolved(uint256 indexed tokenId, bool skillValid, address indexed winner);
+    event VoteCast(uint256 indexed tokenId, address indexed voter, bool vote);
+
+    constructor() ERC721("SkillVerificationNFT", "SVNFT") {}
+
+    // Core Function 1: Mint Skill Verification NFT
+    function mintSkillNFT(
+        address to,
+        string memory skillName,
+        string memory description
+    ) public returns (uint256) {
+        require(authorizedIssuers[msg.sender], "Not authorized to issue skill NFTs");
+        require(bytes(skillName).length > 0, "Skill name cannot be empty");
+        
+        _tokenIds.increment();
+        uint256 newTokenId = _tokenIds.current();
+        
+        skillNFTs[newTokenId] = SkillNFT({
+            skillName: skillName,
+            description: description,
+            issuer: msg.sender,
+            timestamp: block.timestamp,
+            isActive: true,
+            challengeStake: 0,
+            underChallenge: false,
+            challenger: address(0),
+            challengeDeadline: 0
+        });
+        
+        _mint(to, newTokenId);
+        
+        emit SkillVerified(newTokenId, to, skillName, msg.sender);
+        return newTokenId;
+    }
+
+    // Core Function 2: Challenge Skill Verification
+    function challengeSkill(uint256 tokenId, string memory reason) public payable {
+        require(_ownerOf(tokenId) != address(0), "Token does not exist");
+        require(msg.value >= MIN_CHALLENGE_STAKE, "Insufficient challenge stake");
+        require(skillNFTs[tokenId].isActive, "Skill NFT is not active");
+        require(!skillNFTs[tokenId].underChallenge, "Skill is already under challenge");
+        require(msg.sender != ownerOf(tokenId), "Cannot challenge own skill");
+        
+        skillNFTs[tokenId].underChallenge = true;
+        skillNFTs[tokenId].challenger = msg.sender;
+        skillNFTs[tokenId].challengeDeadline = block.timestamp + CHALLENGE_PERIOD;
+        skillNFTs[tokenId].challengeStake = msg.value;
+        
+        // Initialize challenge
+        Challenge storage challenge = challenges[tokenId];
+        challenge.tokenId = tokenId;
+        challenge.challenger = msg.sender;
+        challenge.reason = reason;
+        challenge.stake = msg.value;
+        challenge.deadline = block.timestamp + CHALLENGE_PERIOD;
+        challenge.resolved = false;
+        
+        emit SkillChallenged(tokenId, msg.sender, msg.value);
+    }
+
+    // Core Function 3: Vote on Challenge (Decentralized Jury)
+    function voteOnChallenge(uint256 tokenId, bool voteFor) public {
+        require(_ownerOf(tokenId) != address(0), "Token does not exist");
+        require(skillNFTs[tokenId].underChallenge, "No active challenge for this skill");
+        require(block.timestamp < challenges[tokenId].deadline, "Voting period has ended");
+        require(!challenges[tokenId].hasVoted[msg.sender], "Already voted on this challenge");
+        require(msg.sender != ownerOf(tokenId) && msg.sender != challenges[tokenId].challenger, "Parties cannot vote");
+        
+        challenges[tokenId].hasVoted[msg.sender] = true;
+        
+        if (voteFor) {
+            challenges[tokenId].votesFor++;
+        } else {
+            challenges[tokenId].votesAgainst++;
+        }
+        
+        emit VoteCast(tokenId, msg.sender, voteFor);
+        
+        // Auto-resolve if voting period ended
+        if (block.timestamp >= challenges[tokenId].deadline) {
+            _resolveChallenge(tokenId);
+        }
+    }
+
+    // Internal function to resolve challenge
+    function _resolveChallenge(uint256 tokenId) internal {
+        require(skillNFTs[tokenId].underChallenge, "No active challenge");
+        require(block.timestamp >= challenges[tokenId].deadline, "Voting period not ended");
+        
+        Challenge storage challenge = challenges[tokenId];
+        bool challengeSuccessful = challenge.votesFor > challenge.votesAgainst;
+        
+        if (challengeSuccessful) {
+            // Challenge successful - skill is invalid
+            skillNFTs[tokenId].isActive = false;
+            // Transfer stake to challenger
+            payable(challenge.challenger).transfer(challenge.stake);
+            // Burn the NFT
+            _burn(tokenId);
+        } else {
+            // Challenge failed - skill is valid
+            // Transfer stake to skill holder
+            payable(ownerOf(tokenId)).transfer(challenge.stake);
+        }
+        
+        // Reset challenge state
+        skillNFTs[tokenId].underChallenge = false;
+        skillNFTs[tokenId].challenger = address(0);
+        skillNFTs[tokenId].challengeDeadline = 0;
+        skillNFTs[tokenId].challengeStake = 0;
+        challenge.resolved = true;
+        
+        emit ChallengeResolved(tokenId, !challengeSuccessful, challengeSuccessful ? challenge.challenger : ownerOf(tokenId));
+    }
+
+    // Admin function to authorize skill issuers
+    function authorizeIssuer(address issuer) public onlyOwner {
+        authorizedIssuers[issuer] = true;
+    }
+
+    // Admin function to revoke issuer authorization
+    function revokeIssuer(address issuer) public onlyOwner {
+        authorizedIssuers[issuer] = false;
+    }
+
+    // Public function to resolve expired challenges
+    function resolveChallenge(uint256 tokenId) public {
+        require(block.timestamp >= challenges[tokenId].deadline, "Voting period not ended");
+        _resolveChallenge(tokenId);
+    }
+
+    // View function to get skill details
+    function getSkillDetails(uint256 tokenId) public view returns (
+        string memory skillName,
+        string memory description,
+        address issuer,
+        uint256 timestamp,
+        bool isActive,
+        bool underChallenge
+    ) {
+        require(_ownerOf(tokenId) != address(0), "Token does not exist");
+        SkillNFT memory skill = skillNFTs[tokenId];
+        return (
+            skill.skillName,
+            skill.description,
+            skill.issuer,
+            skill.timestamp,
+            skill.isActive,
+            skill.underChallenge
+        );
+    }
+
+    // View function to get challenge details
+    function getChallengeDetails(uint256 tokenId) public view returns (
+        address challenger,
+        string memory reason,
+        uint256 stake,
+        uint256 votesFor,
+        uint256 votesAgainst,
+        uint256 deadline,
+        bool resolved
+    ) {
+        Challenge storage challenge = challenges[tokenId];
+        return (
+            challenge.challenger,
+            challenge.reason,
+            challenge.stake,
+            challenge.votesFor,
+            challenge.votesAgainst,
+            challenge.deadline,
+            challenge.resolved
+        );
+    }
+}
